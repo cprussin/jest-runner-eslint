@@ -1,4 +1,15 @@
 const { CLIEngine, ESLint } = require('eslint');
+const findUp = require('find-up');
+
+// Eslint exposes the new FlatESLint API under `eslint/use-at-your-own-risk` by
+// using it's [export configuration](https://tinyurl.com/2s45zh9b).  However,
+// the `import/no-unresolved` rule is [not aware of
+// `exports`](https://tinyurl.com/469djpx3) and causes a false error here.  So,
+// let's ignore that rule for this import.
+//
+// eslint-disable-next-line import/no-unresolved
+const { FlatESLint } = require('eslint/use-at-your-own-risk');
+
 const getESLintOptions = require('../utils/getESLintOptions');
 
 /*
@@ -96,12 +107,18 @@ const getComputedFixValue = ({ fix, quiet, fixDryRun }) => {
   return undefined;
 };
 
-const ESLintEngine = ESLint || CLIEngine;
+const useFlatConfig = async () =>
+  !!(await findUp('eslint.config.js', { cwd: process.cwd() }));
+
+const getESLintConstructor = async () =>
+  (await useFlatConfig()) ? FlatESLint : ESLint;
+
+const getESLintEngine = async () => (await getESLintConstructor()) || CLIEngine;
 
 let cachedValues;
-const getCachedValues = (config, extraOptions) => {
+const getCachedValues = async (config, extraOptions) => {
   if (!cachedValues) {
-    const useEngine = ESLint == null;
+    const useEngine = (await getESLintConstructor()) == null;
     const { cliOptions: baseCliOptions } = getESLintOptions(config, !useEngine);
     const cliOptions = {
       ...baseCliOptions,
@@ -116,7 +133,18 @@ const getCachedValues = (config, extraOptions) => {
     delete cliOptions.maxWarnings;
     delete cliOptions.quiet;
 
-    const cli = useEngine ? new CLIEngine(cliOptions) : new ESLint(cliOptions);
+    // these options aren't supported by eslint's flat config
+    if (await useFlatConfig()) {
+      delete cliOptions.extensions;
+      delete cliOptions.ignorePath;
+      delete cliOptions.rulePaths;
+      delete cliOptions.resolvePluginsRelativeTo;
+      delete cliOptions.useEslintrc;
+      delete cliOptions.overrideConfig;
+    }
+
+    const Engine = await getESLintEngine();
+    const cli = new Engine(cliOptions);
 
     cachedValues = {
       isPathIgnored: cli.isPathIgnored.bind(cli),
@@ -162,10 +190,8 @@ const runESLint = async ({ testPath, config, extraOptions }) => {
     config.setupFilesAfterEnv.forEach(require);
   }
 
-  const { isPathIgnored, lintFiles, formatter, cliOptions } = getCachedValues(
-    config,
-    extraOptions,
-  );
+  const { isPathIgnored, lintFiles, formatter, cliOptions } =
+    await getCachedValues(config, extraOptions);
 
   if (await isPathIgnored(testPath)) {
     return mkTestResults({
@@ -184,6 +210,7 @@ const runESLint = async ({ testPath, config, extraOptions }) => {
   }
 
   const report = await lintFiles([testPath]);
+  const ESLintEngine = await getESLintEngine();
 
   if (cliOptions.fix && !cliOptions.fixDryRun) {
     await ESLintEngine.outputFixes(report);
